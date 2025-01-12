@@ -79,30 +79,90 @@ public class Ollama {
         return readResponse(conn);
     }
 
+    // Session context to store file contents
+    private List<String> sessionFiles = new ArrayList<>();
+
     /**
-     * Generate text based on the given prompt.
+     * Add a file to the session context.
+     * Reads the file contents and stores them for potential reference in future prompts.
+     * 
+     * @param filePath Path to the file to be added to the session
+     * @return The contents of the added file
+     * @throws IOException If there's an error reading the file
+     */
+    public String addFileToContext(Path filePath) throws IOException {
+        // Read the file contents
+        String fileContents = readFile(filePath);
+        
+        // Add the file contents to the session files list
+        sessionFiles.add(String.format("File '%s' contents:\n%s", 
+            filePath.getFileName().toString(), 
+            fileContents)
+        );
+        
+        return fileContents;
+    }
+
+    /**
+     * Get all files currently in the session context.
+     * 
+     * @return List of file contents added to the session
+     */
+    public List<String> getSessionFiles() {
+        return new ArrayList<>(sessionFiles);
+    }
+
+    /**
+     * Clear all files from the session context.
+     */
+    public void clearSessionFiles() {
+        sessionFiles.clear();
+    }
+
+    /**
+     * Generate text using the Ollama API.
+     * 
      * @param prompt The user's prompt
      * @return Generated text response
      * @throws IOException If there's a network or connection error
      */
     public String generateText(String prompt) throws IOException {
+        // Prepare the context by combining session files and system instructions
+        StringBuilder fullContext = new StringBuilder(systemInstructions);
+        
+        // Add session files to the context if any exist
+        for (String fileContext : sessionFiles) {
+            fullContext.append("\n\n").append(fileContext);
+        }
+        
+        // Prepare the request
         URL url = new URL(BASE_URL + "/generate");
         HttpURLConnection conn = (HttpURLConnection) url.openConnection();
         conn.setRequestMethod("POST");
         conn.setRequestProperty("Content-Type", "application/json");
         conn.setDoOutput(true);
 
-        // Construct payload with system instructions if provided
-        String payload = constructPayload(prompt);
-        
+        // Construct payload with full context
+        String payload = String.format("{" +
+            "\"model\": \"%s\"," +
+            "\"prompt\": \"%s\"," +
+            "\"system\": \"%s\"," +
+            "\"stream\": false" +
+            "}", 
+            model, 
+            escapeJson(prompt), 
+            escapeJson(fullContext.toString())
+        );
+
+        // Send request
         try (OutputStreamWriter writer = new OutputStreamWriter(conn.getOutputStream(), StandardCharsets.UTF_8)) {
             writer.write(payload);
             writer.flush();
         }
 
+        // Get and return response
         String response = readResponse(conn);
-        // Update context messages
-        updateContextMessages(prompt, response);
+        updateContextMessages(prompt, extractGeneratedText(response));
         return response;
     }
 
@@ -147,25 +207,7 @@ public class Ollama {
     private String readFile(Path path) throws IOException {
         return new String(Files.readAllBytes(path), StandardCharsets.UTF_8);
     }
-
-    /**
-     * Construct the JSON payload for the generation request.
-     * @param prompt The user's prompt
-     * @return Constructed JSON payload
-     */
-    private String constructPayload(String prompt) {
-        return String.format("{" +
-            "\"model\": \"%s\"," +
-            "\"prompt\": \"%s\"," +
-            "\"system\": \"%s\"," +
-            "\"stream\": false" +
-            "}", 
-            model, 
-            escapeJson(prompt), 
-            escapeJson(systemInstructions)
-        );
-    }
-
+    
     /**
      * Read the response from an HTTP connection.
      * @param conn The HTTP connection
@@ -213,20 +255,72 @@ public class Ollama {
     }
 
     /**
+     * Extract the generated text from the full JSON response.
+     * @param jsonResponse The full JSON response from Ollama
+     * @return The extracted generated text
+     */
+    public String extractGeneratedText(String jsonResponse) {
+        // Regular expression to extract the 'response' value from JSON
+        Pattern pattern = Pattern.compile("\"response\"\\s*:\\s*\"(.*?)\"");
+        Matcher matcher = pattern.matcher(jsonResponse);
+        
+        if (matcher.find()) {
+            // Unescape the JSON string
+            return unescapeJson(matcher.group(1));
+        }
+        
+        // Return the original response if no match found
+        return jsonResponse;
+    }
+
+    /**
+     * Generates text and returns only the generated content.
+     * @param prompt The user's prompt
+     * @return Extracted generated text
+     * @throws IOException If there's a network or connection error
+     */
+    public String generateCleanText(String prompt) throws IOException {
+        String fullResponse = generateText(prompt);
+        return extractGeneratedText(fullResponse);
+    }
+
+	public String respond(String prompt) throws IOException {
+        String fullResponse = generateText(prompt);
+        return extractGeneratedText(fullResponse);
+	}
+
+	public String prompt(String prompt) throws IOException {
+        String fullResponse = generateText(prompt);
+        return extractGeneratedText(fullResponse);
+	}
+    /**
+     * Unescape JSON special characters.
+     * @param input The escaped input string
+     * @return Unescaped string
+     */
+    private String unescapeJson(String input) {
+        return input.replace("\\\"", "\"")
+                    .replace("\\\\", "\\")
+                    .replace("\\n", "\n")
+                    .replace("\\r", "\r")
+                    .replace("\\t", "\t");
+    }
+
+    /**
      * Example usage method.
      * @param args Command-line arguments
      */
     public static void main(String[] args) {
         try {
-            // Example of using the OllamaConnector
-            Ollama connector = new Ollama("llama2", "You are a helpful assistant.");
+            // Example of using the Ollama
+            Ollama connector = new Ollama("llama3.2", "You are a helpful assistant.");
             
             // Pull the model first
             System.out.println("Pulling model: " + connector.pullModel());
             
-            // Generate a response
-            String response = connector.generateText("Tell me a short joke.");
-            System.out.println("Response: " + response);
+            // Generate a clean response
+            String cleanResponse = connector.generateCleanText("Tell me a short joke.");
+            System.out.println("Clean Response: " + cleanResponse);
             
         } catch (IOException e) {
             e.printStackTrace();
